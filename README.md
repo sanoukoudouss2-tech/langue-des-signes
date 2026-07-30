@@ -18,7 +18,7 @@ Le pipeline suit les étapes suivantes :
 
 ## 📊 Données
 
-- **Source** : [WLASL (Word-Level American Sign Language) Dataset](https://www.kaggle.com/datasets/risangbaskoro/wlasl-processed)
+- **Source** : [WLASL (Word-Level American Sign Language) Dataset](https://www.kaggle.com/datasets/risangbaskoro/wlasl-processed),[ASL Citizen - Microsoft Research](https://www.microsoft.com/en-us/download/details.aspx?id=105253)
 - **Contenu** : vidéos annotées de signes, accompagnées de métadonnées JSON (gloss, identifiant vidéo, split train/val/test)
 - **Cible** : classe du signe (gloss)
 - **Variables d'entrée** : séquences de landmarks des mains extraits par MediaPipe
@@ -36,7 +36,7 @@ Le pipeline suit les étapes suivantes :
 - **OS** : Windows
 - **IDE** : VS Code
 - **Terminal** : Git Bash
-- **Environnement virtuel** : `mon_env`
+- **Environnement virtuel** : `mon_env,env_training
 - Téléchargement du dataset via la **Kaggle CLI**
 
 ## 📁 Structure du projet
@@ -46,7 +46,6 @@ Le pipeline suit les étapes suivantes :
 ├── data/                  # Dataset WLASL (vidéos + métadonnées JSON)
 ├── dataset_hands_only/    # Fichiers numpy des landmarks extraits par Mediapipe
 ├── env_training/          # Environnement virtuel créer pour l'entrainement des modèles
-
 ├── mon_env                # Environnement virtuel pour l'extraction des landmarks
 ├── src                    # Fonctions utilisées
 ├── model/                 # Modèles retenus
