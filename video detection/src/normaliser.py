@@ -15,4 +15,13 @@ def normalize_hand(pts):
         scale = 1e-6
     pts = pts / scale
     
-    return pts.flatten()
+    return pts.flatten(),wrist,scale
+
+
+def build_trajectory(wrist,scale):
+    wrist = np.asarray(wrist,dtype=np.float64)
+    if scale < 1e-6 :
+        scale = 1e-6
+    ref = wrist[0]
+
+    return (wrist-ref)/scale

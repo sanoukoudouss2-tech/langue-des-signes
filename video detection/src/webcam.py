@@ -1,102 +1,124 @@
+import os,sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import cv2
-import os
 import mediapipe as mp
 import numpy as np
 from ai_edge_litert.interpreter import Interpreter
-from prediction import predict_class_with_confidence
-from normaliser import normalize_hand
+from src.prediction import predict_class_with_confidence
+from src.normaliser import normalize_hand, build_trajectory
 
-def webcam(interpreter,input_details,output_details,classes):
-    # Initialisation des modeles mediapipe
-    ## mp_hands et mp_draws sont des modules qui permettent respectivement de suivre les mains(landsmarks) et de les dessiner à l'écran
+
+def webcam(interpreter, input_details, output_details, classes):
     enregistrement = False
     mot = None
     confiance = None
     a_predit = False
+
     mp_hands = mp.solutions.hands
     mp_draw = mp.solutions.drawing_utils
-    res = []
-    ## hands = mp_hands.Hands est un detecteur de main
-    hands = mp_hands.Hands(max_num_hands = 2,min_detection_confidence=0.7)
-    ## Je commence à utiliser la webcam
+
+    # Buffers de collecte pendant l'enregistrement (remplacent l'ancienne liste "res")
+    lh_shapes_buf, rh_shapes_buf = [], []
+    lh_wrists_buf, rh_wrists_buf = [], []
+    lh_scales_buf, rh_scales_buf = [], []
+
+    hands = mp_hands.Hands(max_num_hands=2, min_detection_confidence=0.7)
+
     s = cv2.VideoCapture(0,cv2.CAP_DSHOW)
     if not s.isOpened():
         print("Erreur: Impossible d'ouvrir la vidéo")
         exit()
 
-    enregistrement = False ## passe a True des que la touche espace est appuyée
-    nb_frames_collecte = 125 ## nombre de frames a collecter une fois l'enregistrement demarré
-    nb_frames_gardees = 100 ## nombre de frames finalement conservées (les dernieres)
+    nb_frames_collecte = 125  # nombre de frames a collecter une fois l'enregistrement demarré
+    nb_frames_gardees = 100   # nombre de frames finalement conservées (les dernieres)
 
     while s.isOpened():
-        ## ret renvoie un booleen qui indique si l'image actuelle est bien chargée
-        ## frame designe la frame de l'image suivante
-        ## Il existe un curseur qui va a la frame suivante à chaque fois qu'on appel s.read()
         ret, frame = s.read()
-        ## mediapipe fonctionne en rgb
         if not ret:
-            ## si ret est a False ca signifie que la frame suivante n'a pas charger. Ce qui veut dire qu'on est a la fin ou qu'il y'a un probleme
             print("Fin de la vidéo.")
             break
-        frame_rgb = cv2.cvtColor(frame,cv2.COLOR_BGR2RGB)
-        ## results contient differentes données concernant les landmarks et les handedness
+
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = hands.process(frame_rgb)
 
-        # Vecteurs vides par défaut (63 valeurs par main), reinitialisés a chaque frame
-        lh = np.zeros(21 * 3)
-        rh = np.zeros(21 * 3)
+        lh_shape = np.zeros(63)
+        rh_shape = np.zeros(63)
+        lh_wrist = np.zeros(3)
+        rh_wrist = np.zeros(3)
+        lh_scale = 1e-6
+        rh_scale = 1e-6
 
         if results.multi_hand_landmarks and results.multi_handedness:
             for hand_landmarks, handedness in zip(results.multi_hand_landmarks, results.multi_handedness):
-                label = handedness.classification[0].label # "Left" ou "Right" pour savoir s'il s'agit d'une main droite ou gauche
-                ## Là j'applatis les handmarks de chaque point de 0 a 20 
-                ## Ma matrice pts contient les handmarks de ma frame active
+                label = handedness.classification[0].label
                 pts = np.array([[lm.x, lm.y, lm.z] for lm in hand_landmarks.landmark]).flatten()
-                pts = normalize_hand(pts)
+                shape_norm, wrist_raw, scale = normalize_hand(pts)
                 if label == "Left":
-                    lh = pts
+                    lh_shape, lh_wrist, lh_scale = shape_norm, wrist_raw, scale
                 else:
-                    rh = pts
+                    rh_shape, rh_wrist, rh_scale = shape_norm, wrist_raw, scale
 
                 mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
 
-        # Fusion des 2 mains (126 features)
-        frame_features = np.hstack([lh, rh])## chercher le axis qui concentene verticalement
+        if enregistrement:
+            lh_shapes_buf.append(lh_shape)
+            rh_shapes_buf.append(rh_shape)
+            lh_wrists_buf.append(lh_wrist)
+            rh_wrists_buf.append(rh_wrist)
+            lh_scales_buf.append(lh_scale)
+            rh_scales_buf.append(rh_scale)
 
-        if enregistrement :
-            res.append(frame_features)
-            cv2.putText(frame, f"REC {len(res)}/{nb_frames_collecte}", (10,30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,150,255), 2)
+            cv2.putText(frame, f"REC {len(lh_shapes_buf)}/{nb_frames_collecte}", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 150, 255), 2)
 
-            if len(res) >= nb_frames_collecte:
-                ## la je retourne ce que je vais entraine et j'entraine
-                res = np.array(res)
-                res = res[-nb_frames_gardees:]
-                mot, confiance = predict_class_with_confidence(res, interpreter, input_details, output_details,classes, seuil=0.8)
+            if len(lh_shapes_buf) >= nb_frames_collecte:
+                # Reconstruction de la séquence (forme + trajectoire), même logique qu'à l'extraction
+                lh_shapes_arr = np.array(lh_shapes_buf)
+                rh_shapes_arr = np.array(rh_shapes_buf)
+
+                valid_lh = [x for x in lh_scales_buf if x > 1e-6]
+                valid_rh = [x for x in rh_scales_buf if x > 1e-6]
+                lh_scale_ref = lh_scales_buf[0] if lh_scales_buf[0] > 1e-6 else (np.mean(valid_lh) if valid_lh else 1e-6)
+                rh_scale_ref = rh_scales_buf[0] if rh_scales_buf[0] > 1e-6 else (np.mean(valid_rh) if valid_rh else 1e-6)
+
+                lh_traj = build_trajectory(lh_wrists_buf, lh_scale_ref)
+                rh_traj = build_trajectory(rh_wrists_buf, rh_scale_ref)
+
+                sequence = np.hstack([lh_shapes_arr, lh_traj, rh_shapes_arr, rh_traj])  # (T, 132)
+                sequence = sequence[-nb_frames_gardees:]  # garde les 100 dernières frames
+
+                mot, confiance = predict_class_with_confidence(
+                    sequence, interpreter, input_details, output_details, classes, seuil=0.8
+                )
                 a_predit = True
                 enregistrement = False
-                res = []
-                cv2.putText(frame, f" mot : {mot}; confiance ; {confiance}  ", (10,30), cv2.FONT_HERSHEY_SIMPLEX, 1, (100,100,100), 2)
-                
 
-        else :
-            cv2.putText(frame, "Appuyer sur ESPACE pour démarrer", (10,30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), 2)
+                lh_shapes_buf, rh_shapes_buf = [], []
+                lh_wrists_buf, rh_wrists_buf = [], []
+                lh_scales_buf, rh_scales_buf = [], []
 
-            if  a_predit:
-                if mot is not None:
-                    cv2.putText(frame, f"Dernier signe : {mot} ({confiance:.1%})", (10, 70),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 200, 0), 2)
-                else:
-                    cv2.putText(frame, f"Signe non reconnu (confiance trop faible: {confiance:.1%})", (10,70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
-                
+                cv2.putText(frame, f" mot : {mot}; confiance ; {confiance} ", (10, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 0), 2)
+        else:
+            cv2.putText(frame, "Appuyer sur ESPACE pour démarrer", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
+
+        if a_predit:
+            if mot is not None:
+                cv2.putText(frame, f"Dernier signe : {mot} ({confiance:.1%})", (10, 70),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0, 0), 2)
+            else:
+                cv2.putText(frame, f"Signe non reconnu (confiance trop faible: {confiance:.1%})", (10, 70),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+
         cv2.imshow("Lecteur Video OpenCV", frame)
-        
-
-            
 
         key = cv2.waitKey(1) & 0xFF
         if key == ord(' ') and not enregistrement:
             enregistrement = True
-            res = []
+            lh_shapes_buf, rh_shapes_buf = [], []
+            lh_wrists_buf, rh_wrists_buf = [], []
+            lh_scales_buf, rh_scales_buf = [], []
         if key == ord('q'):
             break
 
@@ -104,19 +126,16 @@ def webcam(interpreter,input_details,output_details,classes):
     cv2.destroyAllWindows()
 
 
-
-
-
-
 if __name__ == "__main__":
     dossier = r"C:/Users/sanou/Documents/Documents_1/CODE_ALPHA/Video_detection/models"
-    interpreter = Interpreter(model_path=os.path.join(dossier, "modele_final.tflite"))
-    labels = {   "THIN":0,
-    "GO":1,
-    "COMPUTER":2,
-    "HELP":3,
-    "COOL(HANDSOME)":4
-}
+    interpreter = Interpreter(model_path=os.path.join(dossier, "modele_1.tflite"))
+    labels = {
+        "THIN": 0,
+        "GO": 1,
+        "COMPUTER": 2,
+        "HELP": 3,
+        "COOL(HANDSOME)": 4
+    }
     interpreter.allocate_tensors()
     input_details = interpreter.get_input_details()
     output_details = interpreter.get_output_details()
